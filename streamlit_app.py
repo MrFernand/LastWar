@@ -1,17 +1,15 @@
 
-"""streamlit_app.py (v2.1)
+"""streamlit_app.py (v2.1.1 – hot-fix)
 Streamlit app – weekly random draws of titular / substitute guild players.
 
-Changelog v2.1
+Hot-fix v2.1.1
 --------------
-✅ **Plus de tirages rétroactifs ni de doublons**
-   * Dans la barre latérale, on ne peut choisir qu’une **semaine future non encore tirée**.
-   * L’option « Écraser » disparaît ; si une semaine existe déjà, elle n’apparaît tout simplement pas dans la liste.
-
-📋 **Historique complet visible**
-   * Un volet « Historique des tirages » affiche toutes les semaines déjà générées (expander par semaine).
-
-Les corrections sur les doublons de pseudos restent actives.
+* **Fix AttributeError** on some Streamlit versions where
+  `st.experimental_rerun()` is no longer present (it was renamed to
+  `st.rerun()` in 2024).  We now call a small helper `safe_rerun()` that uses
+  `st.rerun()` when available and falls back to `st.experimental_rerun()`.
+* No other behaviour changes: the UI still blocks past / existing weeks and
+  shows the full history.
 """
 from __future__ import annotations
 
@@ -30,7 +28,19 @@ import streamlit as st
 
 DATA_FILE = Path("guild_players_complete.xlsx")
 DB_FILE = Path("draws.db")
-WEEKS_AHEAD_SHOWN = 52  # combien de semaines futures proposer
+WEEKS_AHEAD_SHOWN = 52  # how many future weeks to show in the selector
+
+# ---------------------------------------------------------------------------
+# Helper to trigger an app rerun safely across Streamlit versions
+# ---------------------------------------------------------------------------
+
+def safe_rerun() -> None:
+    """Reload the Streamlit script, using the API available in the runtime."""
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        # Old versions (<1.25) keep the function in the experimental namespace
+        st.experimental_rerun()  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
 # Database helpers
@@ -91,7 +101,7 @@ def load_players() -> None:
     conn.commit()
 
 # ---------------------------------------------------------------------------
-# Helper utils
+# Utility functions (weeks etc.)
 # ---------------------------------------------------------------------------
 
 def week_id_for_date(d: dt.date) -> str:
@@ -103,7 +113,7 @@ def monday_of_week(d: dt.date) -> dt.date:
     return d - dt.timedelta(days=d.weekday())
 
 # ---------------------------------------------------------------------------
-# Week lists
+# Week lists and history helpers
 # ---------------------------------------------------------------------------
 
 def existing_week_ids() -> List[str]:
@@ -138,8 +148,10 @@ def draw_players(dates: List[dt.date]) -> Dict[dt.date, Tuple[int, int]]:
     pool_iter = iter(pool)
 
     for day in dates:
+        # Titular
         tid = next(pid for pid in pool_iter if pid not in used_titulars)
         used_titulars.add(tid)
+        # Substitute
         sid = next(pid for pid in pool_iter if pid != tid)
         schedule[day] = (tid, sid)
     return schedule
@@ -194,9 +206,8 @@ load_players()
 
 st.sidebar.header("Créer une nouvelle semaine")
 
-# Build selectable list: future weeks not yet drawn
 existing_ids = set(existing_week_ids())
-week_options = [monday for monday in upcoming_week_mondays() if week_id_for_date(monday) not in existing_ids]
+week_options = [m for m in upcoming_week_mondays() if week_id_for_date(m) not in existing_ids]
 
 if not week_options:
     st.sidebar.success("Toutes les semaines des 12 prochains mois ont déjà été tirées.")
@@ -212,11 +223,10 @@ else:
         schedule = draw_players(dates)
         save_draw(schedule)
         st.sidebar.success(f"✅ Semaine {week_id_for_date(monday_selected)} créée !")
-        st.experimental_rerun()  # refresh to update lists / tables
+        safe_rerun()  # refresh selector & history
 
 # ---- Main page: overview --------------------------------------------------
 
-# Current ISO week schedule (if exists)
 current_week_id = week_id_for_date(dt.date.today())
 st.subheader(f"Planning semaine courante ({current_week_id})")
 cur_df = fetch_schedule(current_week_id)
@@ -225,12 +235,11 @@ if cur_df.empty:
 else:
     st.table(cur_df)
 
-# Historique
+# Historique complet
 st.subheader("Historique des tirages")
 if not existing_ids:
     st.info("Aucun tirage enregistré pour l'instant.")
 else:
     for wid in sorted(existing_ids):
         with st.expander(f"Semaine {wid}"):
-            hist_df = fetch_schedule(wid)
-            st.table(hist_df)
+            st.table(fetch_schedule(wid))
