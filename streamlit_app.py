@@ -1,17 +1,17 @@
 
-"""streamlit_app.py (v1.2)
-Streamlit app to organise weekly random draws of titular and substitute players
-based on an Excel file of guild members.
+"""streamlit_app.py (v2.1)
+Streamlit app – weekly random draws of titular / substitute guild players.
 
-Changelog v1.2
-==============
-* **Initial draw now excludes Friday** → only **Saturday + Sunday** of the current
-  week are added before the full next week (7 days).  Requested by user.
-* Docstrings & comments updated accordingly.
+Changelog v2.1
+--------------
+✅ **Plus de tirages rétroactifs ni de doublons**
+   * Dans la barre latérale, on ne peut choisir qu’une **semaine future non encore tirée**.
+   * L’option « Écraser » disparaît ; si une semaine existe déjà, elle n’apparaît tout simplement pas dans la liste.
 
-Previous fixes (v1.1) remain:
-* Duplicate `pseudo` handling via INSERT OR IGNORE (no more UNIQUE constraint).
+📋 **Historique complet visible**
+   * Un volet « Historique des tirages » affiche toutes les semaines déjà générées (expander par semaine).
 
+Les corrections sur les doublons de pseudos restent actives.
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ import streamlit as st
 
 DATA_FILE = Path("guild_players_complete.xlsx")
 DB_FILE = Path("draws.db")
+WEEKS_AHEAD_SHOWN = 52  # combien de semaines futures proposer
 
 # ---------------------------------------------------------------------------
 # Database helpers
@@ -67,7 +68,7 @@ def init_db() -> None:
     conn.commit()
 
 # ---------------------------------------------------------------------------
-# Player loader (dedup / upsert)
+# Player loading (deduplicate & upsert)
 # ---------------------------------------------------------------------------
 
 def load_players() -> None:
@@ -90,20 +91,69 @@ def load_players() -> None:
     conn.commit()
 
 # ---------------------------------------------------------------------------
-# Query helpers
+# Helper utils
 # ---------------------------------------------------------------------------
 
-def get_player_pool() -> List[Tuple[int, str]]:
+def week_id_for_date(d: dt.date) -> str:
+    year, week, _ = d.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def monday_of_week(d: dt.date) -> dt.date:
+    return d - dt.timedelta(days=d.weekday())
+
+# ---------------------------------------------------------------------------
+# Week lists
+# ---------------------------------------------------------------------------
+
+def existing_week_ids() -> List[str]:
     conn = get_conn()
-    return conn.execute("SELECT id, pseudo FROM players ORDER BY RANDOM()").fetchall()
+    rows = conn.execute("SELECT DISTINCT week_id FROM draws ORDER BY week_id").fetchall()
+    return [r[0] for r in rows]
+
+
+def upcoming_week_mondays(n_weeks: int = WEEKS_AHEAD_SHOWN) -> List[dt.date]:
+    today = dt.date.today()
+    next_monday = monday_of_week(today + dt.timedelta(days=7))
+    return [next_monday + dt.timedelta(days=7 * i) for i in range(n_weeks)]
+
+# ---------------------------------------------------------------------------
+# Draw engine
+# ---------------------------------------------------------------------------
+
+def get_player_pool_ids() -> List[int]:
+    conn = get_conn()
+    return [row[0] for row in conn.execute("SELECT id FROM players ORDER BY RANDOM()")]
+
+
+def generate_week_dates(week_monday: dt.date) -> List[dt.date]:
+    return [week_monday + dt.timedelta(i) for i in range(7)]
+
+
+def draw_players(dates: List[dt.date]) -> Dict[dt.date, Tuple[int, int]]:
+    pool = get_player_pool_ids()
+    random.shuffle(pool)
+    used_titulars: set[int] = set()
+    schedule: Dict[dt.date, Tuple[int, int]] = {}
+    pool_iter = iter(pool)
+
+    for day in dates:
+        tid = next(pid for pid in pool_iter if pid not in used_titulars)
+        used_titulars.add(tid)
+        sid = next(pid for pid in pool_iter if pid != tid)
+        schedule[day] = (tid, sid)
+    return schedule
 
 
 def save_draw(schedule: Dict[dt.date, Tuple[int, int]]) -> None:
     conn = get_conn()
     conn.executemany(
-        "INSERT OR REPLACE INTO draws(draw_date, titular_id, substitute_id, week_id)\n         VALUES (?, ?, ?, ?)",
+        """
+        INSERT OR REPLACE INTO draws(draw_date, titular_id, substitute_id, week_id)
+        VALUES (?, ?, ?, ?)
+        """,
         [
-            (day.isoformat(), tid, sid, week_identifier(day))
+            (day.isoformat(), tid, sid, week_id_for_date(day))
             for day, (tid, sid) in schedule.items()
         ],
     )
@@ -130,55 +180,6 @@ def fetch_schedule(week_id: str) -> pd.DataFrame:
     return df
 
 # ---------------------------------------------------------------------------
-# Draw logic
-# ---------------------------------------------------------------------------
-
-def week_identifier(date: dt.date) -> str:
-    year, week, _ = date.isocalendar()
-    return f"{year}-W{week:02d}"
-
-
-def generate_dates(initial: bool = False) -> List[dt.date]:
-    """Return list of dates that need a draw.
-
-    * **Initial draw** (`initial=True`) → **Saturday & Sunday** of the current
-      ISO week, **plus full next week (Mon–Sun)**.
-    * Subsequent draws (`initial=False`) → **upcoming Monday–Sunday** only.
-    """
-    today = dt.date.today()
-
-    if initial:
-        # Saturday of current ISO week (weekday 5)
-        saturday = today + dt.timedelta((5 - today.weekday()) % 7)
-        extra_days = [saturday, saturday + dt.timedelta(1)]  # Sat & Sun
-
-        # Next Monday (weekday 0) relative to that Saturday
-        next_monday = saturday + dt.timedelta(days=2)  # always Monday
-        next_week = [next_monday + dt.timedelta(i) for i in range(7)]
-        return extra_days + next_week
-
-    # Not initial → next Monday to Sunday
-    next_monday = today + dt.timedelta(days=((7 - today.weekday()) % 7 or 7))
-    return [next_monday + dt.timedelta(i) for i in range(7)]
-
-
-def draw_players(dates: List[dt.date]) -> Dict[dt.date, Tuple[int, int]]:
-    pool_ids = [pid for pid, _ in get_player_pool()]
-    random.shuffle(pool_ids)
-    used_titulars: set[int] = set()
-    schedule: Dict[dt.date, Tuple[int, int]] = {}
-    pool_iter = iter(pool_ids)
-
-    for date in dates:
-        # Titular: first id not already used this draw
-        tid = next(pid for pid in pool_iter if pid not in used_titulars)
-        used_titulars.add(tid)
-        # Substitute: next different id
-        sid = next(pid for pid in pool_iter if pid != tid)
-        schedule[date] = (tid, sid)
-    return schedule
-
-# ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
 
@@ -189,28 +190,47 @@ st.title("🎲 Tirage au sort des joueurs")
 init_db()
 load_players()
 
-st.sidebar.header("Paramètres du tirage")
+# ---- Sidebar: new week generation ----------------------------------------
 
-if "generated" not in st.session_state:
-    st.session_state.generated = False
+st.sidebar.header("Créer une nouvelle semaine")
 
-initial_draw = st.sidebar.checkbox(
-    "Premier tirage (ajout Samedi-Dimanche)", value=not st.session_state.generated
-)
+# Build selectable list: future weeks not yet drawn
+existing_ids = set(existing_week_ids())
+week_options = [monday for monday in upcoming_week_mondays() if week_id_for_date(monday) not in existing_ids]
 
-if st.sidebar.button("Générer le tirage", type="primary"):
-    dates = generate_dates(initial_draw)
-    schedule = draw_players(dates)
-    save_draw(schedule)
-    st.session_state.generated = True
-    st.success("✅ Tirage enregistré !")
-
-# Display current week schedule
-week_id = week_identifier(dt.date.today())
-df_sched = fetch_schedule(week_id)
-
-if df_sched.empty:
-    st.info("Aucun tirage pour la semaine en cours. Utilise le bouton à gauche.")
+if not week_options:
+    st.sidebar.success("Toutes les semaines des 12 prochains mois ont déjà été tirées.")
 else:
-    st.subheader(f"Planning semaine {week_id}")
-    st.table(df_sched)
+    monday_selected = st.sidebar.selectbox(
+        "Choisis la semaine (lundi) :",
+        week_options,
+        format_func=lambda d: f"Semaine {week_id_for_date(d)} (débute le {d.strftime('%d/%m/%Y')})",
+    )
+
+    if st.sidebar.button("Générer cette semaine"):
+        dates = generate_week_dates(monday_selected)
+        schedule = draw_players(dates)
+        save_draw(schedule)
+        st.sidebar.success(f"✅ Semaine {week_id_for_date(monday_selected)} créée !")
+        st.experimental_rerun()  # refresh to update lists / tables
+
+# ---- Main page: overview --------------------------------------------------
+
+# Current ISO week schedule (if exists)
+current_week_id = week_id_for_date(dt.date.today())
+st.subheader(f"Planning semaine courante ({current_week_id})")
+cur_df = fetch_schedule(current_week_id)
+if cur_df.empty:
+    st.info("Aucun tirage pour cette semaine.")
+else:
+    st.table(cur_df)
+
+# Historique
+st.subheader("Historique des tirages")
+if not existing_ids:
+    st.info("Aucun tirage enregistré pour l'instant.")
+else:
+    for wid in sorted(existing_ids):
+        with st.expander(f"Semaine {wid}"):
+            hist_df = fetch_schedule(wid)
+            st.table(hist_df)
