@@ -1,18 +1,18 @@
-"""streamlit_app.py (v3.0.2)
+"""streamlit_app.py (v3.0.2)
 =================================
-Application complète Streamlit pour gérer les tirages au sort hebdomadaires à
+Application complète Streamlit pour gérer les tirages au sort hebdomadaires à
 partir du classeur **Liste_membres_Train.xlsx**.
 
 Principales fonctionnalités
 ---------------------------
-* **Filtre "Motif sortie"** : les joueurs ayant un motif sont exclus.
-* **Inscription automatique** de la date tirée dans "Date du train".
-* **Historique dans la feuille "Tirages"** (une ligne par jour).
-* **Édition manuelle** d’un planning (tableau éditable → Sauvegarder).
-* **Réinitialisation sécurisée** (bouton + confirmation « CONFIRMER »).
-* **Compatibilité Streamlit ≥ 1.18** (gestion `st.data_editor` / `experimental_*` et `st.rerun`).
+* **Filtre "Motif sortie"** : les joueurs ayant un motif sont exclus.
+* **Inscription automatique** de la date tirée dans "Date du train".
+* **Historique dans la feuille "Tirages"** (une ligne par jour).
+* **Édition manuelle** d’un planning (tableau éditable → Sauvegarder).
+* **Réinitialisation sécurisée** (bouton + confirmation « CONFIRMER »).
+* **Compatibilité Streamlit ≥ 1.18** (gestion `st.data_editor` / `experimental_*` et `st.rerun`).
 
-Pour déployer : requirements.txt minimal
+Pour déployer : requirements.txt minimal
 ```
 streamlit>=1.35
 pandas
@@ -37,10 +37,10 @@ import streamlit as st
 DATA_FILE = Path("Liste_membres_Train.xlsx")
 MEMBRES_SHEET = "Membres"
 TIRAGES_SHEET = "Tirages"
-WEEKS_AHEAD_SHOWN = 52  # 1 an
+WEEKS_AHEAD_SHOWN = 52  # 1 an
 
 # ---------------------------------------------------------------------------
-# Compatibilité Streamlit
+# Compatibilité Streamlit
 # ---------------------------------------------------------------------------
 
 def _data_editor(df: pd.DataFrame, **kwargs):
@@ -73,8 +73,29 @@ def _concat_date(existing: str | float | None, new_date: str | None) -> str | No
 
 
 def _remove_week_dates(existing: str | None, week_dates: set[dt.date]) -> str | None:
+    """Supprime les dates appartenant à la semaine `week_dates`.
+
+    * Ignore les sous-chaînes vides ou mal formées au format ISO.
+    * Évite ValueError en utilisant un try/except.
+    """
     if pd.isna(existing) or existing is None or str(existing).strip() == "":
         return existing
+
+    kept_parts: List[str] = []
+    for part in str(existing).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            date_obj = dt.date.fromisoformat(part)
+        except ValueError:
+            # entrée non ISO 8601, on la conserve telle quelle
+            kept_parts.append(part)
+            continue
+        if date_obj not in week_dates:
+            kept_parts.append(part)
+
+    return ", ".join(kept_parts) if kept_parts else None
     kept = [d for d in str(existing).split(",") if dt.date.fromisoformat(d.strip()) not in week_dates]
     return ", ".join(kept) if kept else None
 
@@ -96,7 +117,7 @@ def _load_players_df(wb: openpyxl.Workbook) -> pd.DataFrame:
     df = pd.read_excel(DATA_FILE, sheet_name=MEMBRES_SHEET, engine="openpyxl")
     required = {"Pseudo", "Motif sortie", "Date du train"}
     if not required.issubset(df.columns):
-        st.error("Colonnes manquantes : " + ", ".join(required))
+        st.error("Colonnes manquantes : " + ", ".join(required))
         st.stop()
     return df
 
@@ -107,7 +128,7 @@ def _save_players_df(df: pd.DataFrame, wb: openpyxl.Workbook) -> None:
 
 
 def _append_tirages_rows(rows: List[Tuple[str, str, str, str]], wb: openpyxl.Workbook) -> None:
-    """Ajoute les lignes à la feuille Tirages (création si besoin)."""
+    """Ajoute les lignes à la feuille Tirages (création si besoin)."""
     if TIRAGES_SHEET not in wb.sheetnames:
         ws = wb.create_sheet(TIRAGES_SHEET)
         ws.append(["Semaine", "Date", "Titulaire", "Suppléant"])
@@ -125,10 +146,24 @@ def _tirages_df(wb: openpyxl.Workbook) -> pd.DataFrame:
 
 
 def _clear_tirages_and_dates(wb: openpyxl.Workbook, players_df: pd.DataFrame) -> None:
+    """Supprime toutes les lignes de la feuille Tirages (en conservant l'en-tête)
+    et remet à blanc la colonne « Date du train ».
+    La feuille est recréée au besoin pour garantir qu’elle existe après reset.
+    """
     if TIRAGES_SHEET in wb.sheetnames:
-        wb.remove(wb[TIRAGES_SHEET])
-    players_df["Date du train"] = pd.NA
-    _save_players_df(players_df, wb)
+        ws = wb[TIRAGES_SHEET]
+        # Supprime tout sauf la première ligne (header)
+        if ws.max_row > 1:
+            ws.delete_rows(2, ws.max_row)
+    else:
+        ws = wb.create_sheet(TIRAGES_SHEET)
+        ws.append(["Semaine", "Date", "Titulaire", "Suppléant"])
+
+    # Réinitialiser la colonne Date du train
+    if "Date du train" in players_df.columns:
+        players_df["Date du train"] = pd.NA
+        _save_players_df(players_df, wb)
+
     wb.save(DATA_FILE)
 
 # ---------------------------------------------------------------------------
@@ -213,7 +248,7 @@ st.title("🎲 Tirages au sort – Liste Train")
 wb = _load_workbook()
 players_df = _load_players_df(wb)
 
-# ---- Barre latérale : Génération --------------------------------------------------------------
+# ---- Barre latérale : Génération --------------------------------------------------------------
 
 st.sidebar.header("Générer une semaine")
 existing_wids = set(_tirages_df(wb)["Semaine"].unique())
@@ -228,7 +263,7 @@ if week_opts:
     if st.sidebar.button("🎲 Générer"):
         elig = _eligible(players_df)
         if len(elig) < 14:
-            st.sidebar.error("Pas assez de joueurs éligibles (min 14)")
+            st.sidebar.error("Pas assez de joueurs éligibles (min 14)")
         else:
             sched = _draw_week(elig, monday_sel)
             rows = [(_week_id_for_date(monday_sel), d.isoformat(), tit, sup) for d, (tit, sup) in sched.items()]
@@ -244,7 +279,7 @@ if week_opts:
 else:
     st.sidebar.info("Toutes les semaines futures sont déjà tirées.")
 
-# ---- Barre latérale : Réinitialisation --------------------------------------------------------
+# ---- Barre latérale : Réinitialisation --------------------------------------------------------
 
 st.sidebar.header("Réinitialiser")
 if st.sidebar.button("🗑️ Réinitialiser les tirages"):
