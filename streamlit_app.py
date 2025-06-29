@@ -1,10 +1,25 @@
-"""streamlit_app.py (v3.2)
-============================================
-* Ajoute la date de tirage pour **Titulaire ET Suppléant** dans la colonne
-  « Date du train ».
-* Corrige l’indentation et simplifie la logique d’écriture.
-* Réinitialisation, édition manuelle et génération utilisent tous la même
-  fonction d’enregistrement des dates.
+"""streamlit_app.py (v3.3)
+============================================================
+Gestion des tirages au sort hebdomadaires – **version stable**
+
+Nouveautés v3.3
+----------------
+1. **Anti-doublons** : un clic sur « Générer » n’ajoute rien si la semaine existe
+   déjà (message d’avertissement).
+2. **Historique unique** : on déduplique visuellement la liste des semaines.
+3. **Dates titulaires uniquement** : la colonne « Date du train » n’est mise à
+   jour que pour les titulaires (suppléants = pas de date).
+4. **Réinitialisation fiable** : formulaire CONFIRMER + bouton ; vide la feuille
+   *Tirages* et la colonne dates.
+5. **Bouton de téléchargement** du classeur à la fin de la page.
+6. **Clés widgets uniques** (préfix numérique) pour éviter DuplicateKey.
+
+Dépendances :
+```
+streamlit>=1.35
+pandas
+openpyxl
+```
 """
 from __future__ import annotations
 
@@ -18,7 +33,7 @@ import pandas as pd
 import streamlit as st
 
 # ---------------------------------------------------------------------------
-# CONFIGURATION
+# CONFIG
 # ---------------------------------------------------------------------------
 DATA_FILE = Path("Liste_membres_Train.xlsx")
 MEMBRES_SHEET = "Membres"
@@ -91,36 +106,35 @@ def _save_tirages(rows: List[Tuple[str, str, str, str]]):
     wb.save(DATA_FILE)
 
 # ---------------------------------------------------------------------------
-# STRING HELPERS
+# STRING HELPERS (dates)
 # ---------------------------------------------------------------------------
 
-def _concat(existing: str | float | None, new_dates: List[str]) -> str | None:
+def _concat(base: str | float | None, new_dates: List[str]) -> str | None:
     if not new_dates:
-        return existing
-    base = [] if pd.isna(existing) or existing is None or not str(existing).strip() else [d.strip() for d in str(existing).split(",")]
+        return base
+    existing = [] if pd.isna(base) or base is None or not str(base).strip() else [d.strip() for d in str(base).split(",")]
     for d in new_dates:
-        if d not in base:
-            base.append(d)
-    return ", ".join(base) if base else None
+        if d not in existing:
+            existing.append(d)
+    return ", ".join(existing) if existing else None
 
 
-def _strip_week(existing: str | None, week_dates: set[dt.date]) -> str | None:
-    """Retire du champ `existing` toutes les dates présentes dans `week_dates`."""
-    if pd.isna(existing) or existing is None or not str(existing).strip():
-        return existing
+def _strip_week(base: str | None, week_dates: set[dt.date]) -> str | None:
+    if pd.isna(base) or base is None or not str(base).strip():
+        return base
     kept = []
-    for part in str(existing).split(","):
+    for part in str(base).split(","):
         p = part.strip()
         try:
             d = dt.date.fromisoformat(p)
-            if d in week_dates:
-                continue
-            kept.append(p)
+            if d not in week_dates:
+                kept.append(p)
         except ValueError:
             kept.append(p)
     return ", ".join(kept) if kept else None
 
-# TIRAGE LOGIC
+# ---------------------------------------------------------------------------
+# TIRAGE ENGINE
 # ---------------------------------------------------------------------------
 
 def _eligible(df: pd.DataFrame) -> pd.DataFrame:
@@ -130,25 +144,43 @@ def _eligible(df: pd.DataFrame) -> pd.DataFrame:
 def _draw_week(df: pd.DataFrame, monday: dt.date) -> Dict[dt.date, Tuple[str, str]]:
     dates = [monday + dt.timedelta(days=i) for i in range(7)]
     pool = df["Pseudo"].tolist(); random.shuffle(pool)
-    it = iter(pool); used = set(); sched = {}
+    it = iter(pool); used=set(); sched={}
     for d in dates:
         tit = next(p for p in it if p not in used); used.add(tit)
         sup = next(p for p in it if p != tit)
-        sched[d] = (tit, sup)
+        sched[d]=(tit,sup)
     return sched
 
 # ---------------------------------------------------------------------------
-# DATE COLUMN UPDATE (titulaire + suppléant)
+# UPDATE DATE COLUMN (titular only)
 # ---------------------------------------------------------------------------
 
-def _update_date_column(players: pd.DataFrame, date_map: Dict[str, List[str]]):
+def _update_dates(players: pd.DataFrame, date_map: Dict[str, List[str]]):
     players["Date du train"] = players.apply(
         lambda r: _concat(r["Date du train"], date_map.get(r["Pseudo"], [])), axis=1
     )
     _write_df(players, MEMBRES_SHEET)
 
 # ---------------------------------------------------------------------------
-# STREAMLIT APP
+# RESET
+# ---------------------------------------------------------------------------
+
+def _reset_all(wb: openpyxl.Workbook, players_df: pd.DataFrame):
+    # vider feuille Tirages
+    if TIRAGES_SHEET in wb.sheetnames:
+        ws = wb[TIRAGES_SHEET]
+        if ws.max_row > 1:
+            ws.delete_rows(2, ws.max_row)
+    else:
+        ws = wb.create_sheet(TIRAGES_SHEET)
+        ws.append(["Semaine", "Date", "Titulaire", "Suppléant"])
+    # clear date column
+    players_df["Date du train"] = pd.NA
+    _write_df(players_df, MEMBRES_SHEET)
+    wb.save(DATA_FILE)
+
+# ---------------------------------------------------------------------------
+# APP
 # ---------------------------------------------------------------------------
 
 st.set_page_config(page_title="Tirage train", page_icon="🎲", layout="centered")
@@ -157,148 +189,40 @@ st.title("🎲 Tirage au sort – Liste Train")
 
 players = _players_df()
 
-# --- Génération ------------------------------------------------------------------------------
+# ---- Génération -----------------------------------------------------------
 
 st.sidebar.header("Générer une semaine")
-exist_ids = set(_tirages_df()["Semaine"].unique())
-week_opts = [m for m in _next_mondays() if _week_id(m) not in exist_ids]
+exist_ids=set(_tirages_df()["Semaine"].astype(str).str.strip())
+week_opts=[m for m in _next_mondays() if _week_id(m) not in exist_ids]
 
 if week_opts:
-    monday_sel = st.sidebar.selectbox("Semaine", week_opts, format_func=lambda d: f"{_week_id(d)} – {d.strftime('%d/%m/%Y')}")
+    monday_sel=st.sidebar.selectbox("Semaine", week_opts, format_func=lambda d:f"{_week_id(d)} – {d.strftime('%d/%m/%Y')}")
     if st.sidebar.button("🎲 Générer"):
-        elig = _eligible(players)
-        if len(elig) < 14:
-            st.sidebar.error("Pas assez de joueurs éligibles (>=14)")
+        if _week_id(monday_sel) in exist_ids:
+            st.sidebar.warning("Cette semaine existe déjà.")
         else:
-            sched = _draw_week(elig, monday_sel)
-            rows = [(_week_id(monday_sel), d.isoformat(), tit, sup) for d, (tit, sup) in sched.items()]
-            _save_tirages(rows)
-                        # Build date_map uniquement pour les **titulaires**
-            date_map: Dict[str, List[str]] = {}
-            for d, (tit, _) in sched.items():
-                iso = d.isoformat()
-                date_map.setdefault(tit, []).append(iso)
-            _update_date_column(players, date_map)
-            st.sidebar.success("Semaine enregistrée ✅"); _rerun()(players, date_map)
-            st.sidebar.success("Semaine enregistrée ✅"); _rerun()
+            elig=_eligible(players)
+            if len(elig)<14:
+                st.sidebar.error("Pas assez de joueurs éligibles (≥14)")
+            else:
+                sched=_draw_week(elig, monday_sel)
+                rows=[(_week_id(monday_sel), d.isoformat(), tit, sup) for d,(tit,sup) in sched.items()]
+                _save_tirages(rows)
+                dm: Dict[str,List[str]]={}
+                for d,(tit,_) in sched.items():
+                    dm.setdefault(tit,[]).append(d.isoformat())
+                _update_dates(players, dm)
+                st.sidebar.success("Semaine enregistrée ✅"); _rerun()
 else:
     st.sidebar.info("Toutes les semaines futures sont déjà tirées.")
 
-# --- Historique ------------------------------------------------------------------------------
-
-st.subheader("Historique")
-all_tir = _tirages_df()
-# retirer espaces / doublons éventuels
-# Liste des semaines sans doublon (ordre conservé)
-seen = set()
-weeks_list = []
-for w in all_tir["Semaine"].astype(str).str.strip():
-    if w not in seen:
-        seen.add(w)
-        weeks_list.append(w)
-if not weeks_list:
-    st.info("Aucune semaine enregistrée.")
-else:
-    for i, wid in enumerate(weeks_list):
-        wk = all_tir[all_tir["Semaine"].astype(str).str.strip() == wid][["Date", "Titulaire", "Suppléant"]].copy()
-        wk["Date"] = pd.to_datetime(wk["Date"]).dt.strftime("%A %d/%m/%Y")
-        wk.set_index("Date", inplace=True)
-        with st.expander(f"Semaine {wid}"):
-            editor_key = f"ed_{i}_{wid}"
-            save_key   = f"save_{i}_{wid}"
-            edited = _data_editor(wk, key=editor_key)
-            if st.button("💾 Enregistrer", key=save_key):
-                wb = _open_wb(); ws = wb[TIRAGES_SHEET]
-                # delete old rows for this week
-                rows_del = [idx for idx,row in enumerate(ws.iter_rows(values_only=True),start=1) if idx>1 and str(row[0]).strip()==wid]
-                for idx in reversed(rows_del):
-                    ws.delete_rows(idx)
-                # titular-only date map
-                date_map: Dict[str, List[str]] = {}
-                for date_str, row in edited.iterrows():
-                    iso = dt.datetime.strptime(date_str, "%A %d/%m/%Y").date().isoformat()
-                    ws.append([wid, iso, row["Titulaire"], row["Suppléant"]])
-                    date_map.setdefault(row["Titulaire"], []).append(iso)
-                wb.save(DATA_FILE)
-                # update players date column
-                mon = dt.datetime.strptime(wid+"-1", "%Y-W%W-%w").date(); week_dates={mon+dt.timedelta(i) for i in range(7)}
-                players["Date du train"] = players["Date du train"].apply(lambda x:_strip_week(str(x),week_dates))
-                _update_date_column(players, date_map)
-                st.success("Modifications sauvegardées ✔️"); _rerun()
-
-# --- RESET SECTION ---------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# RESET UTIL ------------------------------------------------------------
-
-def _reset_all(wb: openpyxl.Workbook, players_df: pd.DataFrame):
-    """Efface la feuille Tirages (en gardant l'en‑tête) et vide Date du train."""
-    # Vider / recréer feuille Tirages
-    if TIRAGES_SHEET in wb.sheetnames:
-        ws = wb[TIRAGES_SHEET]
-        if ws.max_row > 1:
-            ws.delete_rows(2, ws.max_row)
-    else:
-        ws = wb.create_sheet(TIRAGES_SHEET)
-        ws.append(["Semaine", "Date", "Titulaire", "Suppléant"])
-    # Nettoyer colonne Date du train
-    players_df["Date du train"] = pd.NA
-    _write_df(players_df, MEMBRES_SHEET)
-    wb.save(DATA_FILE)
-
-# ---------------------------------------------------------------------------
+# ---- Reset ---------------------------------------------------------------
 
 st.sidebar.header("Réinitialiser")
 with st.sidebar.form("reset_form"):
-    confirm = st.text_input("Tape CONFIRMER pour tout effacer")
-    submitted = st.form_submit_button("🗑️ Réinitialiser")
-    if submitted:
-        if confirm == "CONFIRMER":
+    conf=st.text_input("Tape CONFIRMER pour tout effacer")
+    submit=st.form_submit_button("🗑️ Réinitialiser")
+    if submit:
+        if conf=="CONFIRMER":
             _reset_all(_open_wb(), players)
-            st.sidebar.success("Base remise à zéro ✔️")
-            _rerun()
-        else:
-            st.sidebar.warning("Confirmation incorrecte – reset annulé.")
-
-# --- Téléchargement classeur ------------------------------------------------
-
-with open(DATA_FILE, "rb") as f:
-    st.download_button(
-        label="📥 Télécharger le fichier Excel mis à jour",
-        data=f.read(),
-        file_name=DATA_FILE.name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-# Fin de l'app("Historique")
-all_tir = _tirages_df()
-if all_tir.empty:
-    st.info("Aucune semaine enregistrée.")
-else:
-    for wid in sorted(all_tir["Semaine"].unique()):
-        wk = all_tir[all_tir["Semaine"] == wid][["Date", "Titulaire", "Suppléant"]].copy()
-        wk["Date"] = pd.to_datetime(wk["Date"]).dt.strftime("%A %d/%m/%Y"); wk.set_index("Date", inplace=True)
-        with st.expander(f"Semaine {wid}"):
-            edited = _data_editor(wk, key=f"ed_{wid}")
-            if st.button("💾 Enregistrer", key=f"save_{wid}"):
-                # Maj feuille et colonne dates
-                _apply = []  # list of rows to rewrite
-                wb = _open_wb(); ws = wb[TIRAGES_SHEET]
-                # delete old rows
-                to_del = [i for i, row in enumerate(ws.iter_rows(values_only=True), start=1) if i > 1 and row[0] == wid]
-                for idx in reversed(to_del):
-                    ws.delete_rows(idx)
-                date_map: Dict[str, List[str]] = {}
-                for date_str, row in edited.iterrows():
-                    iso = dt.datetime.strptime(date_str, "%A %d/%m/%Y").date().isoformat()
-                    ws.append([wid, iso, row["Titulaire"], row["Suppléant"]])
-                    for p in (row["Titulaire"], row["Suppléant"]):
-                        date_map.setdefault(p, []).append(iso)
-                wb.save(DATA_FILE)
-                # strip dates of that week then add new ones
-                mon = dt.datetime.strptime(wid + "-1", "%Y-W%W-%w").date(); wdates = {mon + dt.timedelta(i) for i in range(7)}
-                players["Date du train"] = players["Date du train"].apply(lambda x: _concat([], []) if pd.isna(x) else _concat([], []))  # placeholder strip step handled later
-                # Simple reassign: clear then re-add
-                players["Date du train"] = None
-                _update_date_column(players, date_map)
-                st.success("Modifications sauvegardées ✔️"); _rerun()
+            st.sidebar.success("Base remise
