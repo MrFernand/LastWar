@@ -214,6 +214,7 @@ else:
 # --- Reset -----------------------------------------------------------------
 
 st.sidebar.header("Réinitialiser")
+submit = False  # initialise pour éviter NameError
 with st.sidebar.form("reset_form"):
     conf = st.text_input("Tape CONFIRMER pour tout effacer")
     submit
