@@ -1,21 +1,21 @@
-"""streamlit_app.py (v3.1)
+"""streamlit_app.py (v3.1)
 =========================================
-Refonte stabilité : réinitialisation fiable + écriture Excel garantie.
+Refonte stabilité : réinitialisation fiable + écriture Excel garantie.
 
 Correctifs majeurs
 ------------------
-1. **Réinitialisation fiable** :
-   * interface sous `st.sidebar.form()` : champ « CONFIRMER » **puis** bouton *Valider* ;
-   * la feuille *Tirages* est vidée (l'en-tête est conservé/créé) ;
-   * la colonne « Date du train » est effacée ;
+1. **Réinitialisation fiable** :
+   * interface sous `st.sidebar.form()` : champ « CONFIRMER » **puis** bouton *Valider* ;
+   * la feuille *Tirages* est vidée (l'en‑tête est conservé/créé) ;
+   * la colonne « Date du train » est effacée ;
    * le classeur est sauvegardé ⇒ les semaines redeviennent disponibles.
-2. **Écriture Excel solide** :
-   * après chaque modification (tirage, édition, reset) **double sauvegarde** :
-     `wb.save(...)` **et** ré-écriture DataFrame via `pandas.ExcelWriter`.
-   * évite les “workbook not saved” ou « stale data ».
-3. **UX** : messages clairs côté barre latérale et historique.
+2. **Écriture Excel solide** :
+   * après chaque modification (tirage, édition, reset) **double sauvegarde** :
+     `wb.save(...)` **et** ré‑écriture DataFrame via `pandas.ExcelWriter`.
+   * évite les “workbook not saved” ou « stale data ».
+3. **UX** : messages clairs côté barre latérale et historique.
 
-Dépendances : `streamlit>=1.35`, `pandas`, `openpyxl>=3.1`.
+Dépendances : `streamlit>=1.35`, `pandas`, `openpyxl>=3.1`.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ import pandas as pd
 import streamlit as st
 
 # ---------------------------------------------------------------------------
-# CONFIGURATION
+# CONFIGURATION
 # ---------------------------------------------------------------------------
 
 DATA_FILE = Path("Liste_membres_Train.xlsx")
@@ -38,7 +38,7 @@ TIRAGES_SHEET = "Tirages"
 WEEKS_AHEAD = 52  # semaines futures proposées
 
 # ---------------------------------------------------------------------------
-# COMPAT WRAPPERS
+# COMPAT WRAPPERS
 # ---------------------------------------------------------------------------
 
 def _data_editor(df: pd.DataFrame, **kw):
@@ -54,7 +54,7 @@ def _rerun():
         st.experimental_rerun()  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
-# DATE HELPERS
+# DATE HELPERS
 # ---------------------------------------------------------------------------
 
 def _week_id(d: dt.date) -> str:
@@ -71,7 +71,7 @@ def _next_mondays(n: int = WEEKS_AHEAD) -> List[dt.date]:
     return [start + dt.timedelta(weeks=i) for i in range(n)]
 
 # ---------------------------------------------------------------------------
-# EXCEL I/O
+# EXCEL I/O
 # ---------------------------------------------------------------------------
 
 def _open_wb() -> openpyxl.Workbook:
@@ -116,7 +116,7 @@ def _save_tirages(rows: List[Tuple[str, str, str, str]], wb: openpyxl.Workbook):
     wb.save(DATA_FILE)
 
 # ---------------------------------------------------------------------------
-# STRING HELPERS (dates concat)
+# STRING HELPERS (dates concat)
 # ---------------------------------------------------------------------------
 
 def _concat_date(existing: str | float | None, new_iso: str | None) -> str | None:
@@ -231,7 +231,12 @@ if opt:
             sched=_draw_week(elig, monday_sel)
             rows=[(_week_id(monday_sel), d.isoformat(),tit,sup) for d,(tit,sup) in sched.items()]
             _save_tirages(rows, wb)
-            date_map={tit:d.isoformat() for d,(tit,_) in sched.items()}
+            # map dates pour titulaires **et** suppléants
+date_map = {}
+for d, (tit, sup) in sched.items():
+    iso = d.isoformat()
+    for p in (tit, sup):
+        date_map.setdefault(p, []).append(iso)
             players["Date du train"] = players.apply(lambda r:_concat_date(r["Date du train"],date_map.get(r["Pseudo"])) if r["Pseudo"] in date_map else r["Date du train"],axis=1)
             _write_df(players, MEMBRES_SHEET); wb.save(DATA_FILE)
             st.sidebar.success("Semaine enregistrée ✅"); _rerun()
@@ -266,11 +271,3 @@ else:
             if st.button("💾 Enregistrer", key=f"save_{wid}"):
                 _apply_edits(edited, wid, wb, players)
                 st.success("Modifications sauvegardées ✔️"); _rerun()
-# --- Téléchargement du classeur -------------------------------------------
-with open(DATA_FILE, "rb") as f:
-    st.download_button(
-        label="📥 Télécharger le fichier Excel mis à jour",
-        data=f.read(),
-        file_name=DATA_FILE.name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
