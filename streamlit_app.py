@@ -189,7 +189,13 @@ else:
 st.subheader("Historique")
 all_tir = _tirages_df()
 # retirer espaces / doublons éventuels
-weeks_list = sorted(pd.unique(all_tir["Semaine"].astype(str).str.strip()))
+# Liste des semaines sans doublon (ordre conservé)
+seen = set()
+weeks_list = []
+for w in all_tir["Semaine"].astype(str).str.strip():
+    if w not in seen:
+        seen.add(w)
+        weeks_list.append(w)
 if not weeks_list:
     st.info("Aucune semaine enregistrée.")
 else:
@@ -226,7 +232,7 @@ else:
 # RESET UTIL ------------------------------------------------------------
 
 def _reset_all(wb: openpyxl.Workbook, players_df: pd.DataFrame):
-    """Efface la feuille Tirages (en gardant l'en-tête) et vide Date du train."""
+    """Efface la feuille Tirages (en gardant l'en‑tête) et vide Date du train."""
     # Vider / recréer feuille Tirages
     if TIRAGES_SHEET in wb.sheetnames:
         ws = wb[TIRAGES_SHEET]
@@ -253,6 +259,16 @@ with st.sidebar.form("reset_form"):
             _rerun()
         else:
             st.sidebar.warning("Confirmation incorrecte – reset annulé.")
+
+# --- Téléchargement classeur ------------------------------------------------
+
+with open(DATA_FILE, "rb") as f:
+    st.download_button(
+        label="📥 Télécharger le fichier Excel mis à jour",
+        data=f.read(),
+        file_name=DATA_FILE.name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 # Fin de l'app("Historique")
 all_tir = _tirages_df()
