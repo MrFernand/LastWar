@@ -188,32 +188,51 @@ else:
 
 st.subheader("Historique")
 all_tir = _tirages_df()
-if all_tir.empty:
+# retirer espaces / doublons éventuels
+weeks_list = sorted(pd.unique(all_tir["Semaine"].astype(str).str.strip()))
+if not weeks_list:
     st.info("Aucune semaine enregistrée.")
 else:
-    for i, wid in enumerate(sorted(all_tir["Semaine"].unique())):
-        wk = all_tir[all_tir["Semaine"] == wid][["Date", "Titulaire", "Suppléant"]].copy()
-        wk["Date"] = pd.to_datetime(wk["Date"]).dt.strftime("%A %d/%m/%Y"); wk.set_index("Date", inplace=True)
+    for i, wid in enumerate(weeks_list):
+        wk = all_tir[all_tir["Semaine"].astype(str).str.strip() == wid][["Date", "Titulaire", "Suppléant"]].copy()
+        wk["Date"] = pd.to_datetime(wk["Date"]).dt.strftime("%A %d/%m/%Y")
+        wk.set_index("Date", inplace=True)
         with st.expander(f"Semaine {wid}"):
             editor_key = f"ed_{i}_{wid}"
             save_key   = f"save_{i}_{wid}"
             edited = _data_editor(wk, key=editor_key)
             if st.button("💾 Enregistrer", key=save_key):
                 wb = _open_wb(); ws = wb[TIRAGES_SHEET]
-                # delete old
-                rows_del=[idx for idx,row in enumerate(ws.iter_rows(values_only=True),start=1) if idx>1 and row[0]==wid]
+                # delete old rows for this week
+                rows_del = [idx for idx,row in enumerate(ws.iter_rows(values_only=True),start=1) if idx>1 and str(row[0]).strip()==wid]
                 for idx in reversed(rows_del):
                     ws.delete_rows(idx)
-                date_map: Dict[str,List[str]] = {}
+                # titular-only date map
+                date_map: Dict[str, List[str]] = {}
                 for date_str, row in edited.iterrows():
                     iso = dt.datetime.strptime(date_str, "%A %d/%m/%Y").date().isoformat()
                     ws.append([wid, iso, row["Titulaire"], row["Suppléant"]])
                     date_map.setdefault(row["Titulaire"], []).append(iso)
                 wb.save(DATA_FILE)
-                mon=dt.datetime.strptime(wid+"-1", "%Y-W%W-%w").date(); week_dates={mon+dt.timedelta(i) for i in range(7)}
+                # update players date column
+                mon = dt.datetime.strptime(wid+"-1", "%Y-W%W-%w").date(); week_dates={mon+dt.timedelta(i) for i in range(7)}
                 players["Date du train"] = players["Date du train"].apply(lambda x:_strip_week(str(x),week_dates))
-                _update_date_column(players,date_map)
+                _update_date_column(players, date_map)
                 st.success("Modifications sauvegardées ✔️"); _rerun()
+
+# --- RESET SECTION ---------------------------------------------------------
+
+st.sidebar.header("Réinitialiser")
+with st.sidebar.form("reset_form"):
+    confirm = st.text_input("Tape CONFIRMER pour tout effacer")
+    submitted = st.form_submit_button("🗑️ Réinitialiser")
+    if submitted:
+        if confirm == "CONFIRMER":
+            _reset_all(_open_wb(), players)
+            st.sidebar.success("Base remise à zéro ✔️")
+            _rerun()
+        else:
+            st.sidebar.warning("Confirmation incorrecte – reset annulé.")
 
 # Fin de l'app("Historique")
 all_tir = _tirages_df()
