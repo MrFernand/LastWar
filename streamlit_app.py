@@ -214,7 +214,23 @@ else:
 # --- Reset -----------------------------------------------------------------
 
 st.sidebar.header("Réinitialiser")
-submit = False  # initialise pour éviter NameError
 with st.sidebar.form("reset_form"):
     conf = st.text_input("Tape CONFIRMER pour tout effacer")
-    submit
+    submit = st.form_submit_button("🗑️ Réinitialiser")
+    if submit:
+        if conf == "CONFIRMER":
+            _reset_all()
+            st.sidebar.success("Base remise à zéro ✔️")
+            _rerun()
+        else:
+            st.sidebar.warning("Confirmation incorrecte – reset annulé.")
+
+# ---- Téléchargement -------------------------------------------------------
+
+with open(DATA_FILE, "rb") as f:
+    st.download_button(
+        label="📥 Télécharger le fichier Excel mis à jour",
+        data=f.read(),
+        file_name=DATA_FILE.name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
