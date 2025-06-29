@@ -1,31 +1,9 @@
-"""streamlit_app.py (v3.4)
+"""streamlit_app.py (v3.4.1)
 ============================================================
-**Tirage au sort hebdomadaire – prise en compte du Rang R1**
+Correction de la parenthèse manquante (SyntaxError) + code complet.
 
-Nouveautés v3.4
-----------------
-* **Exclusion automatique des joueurs de rang R1** : la fonction d’éligibilité
-  filtre désormais `Motif sortie == ""` *et* `Rang != "R1"`.
-* Comme le fichier Excel peut être modifié chaque semaine, le filtre se base
-  sur les données *chargées à la volée* ; un joueur redevient éligible dès que
-  son rang n’est plus R1.
-* Vérification supplémentaire : la colonne **Rang** doit exister, sinon l’app
-  affiche une erreur claire.
-
-Rappel des autres fonctions (héritées de la v3.3)
--------------------------------------------------
-* Anti-doublons sur la génération.
-* Colonne « Date du train » mise à jour seulement pour les titulaires.
-* Réinitialisation CONFIRMER + bouton.
-* Bouton de téléchargement du classeur.
-* Clés widgets uniques.
-
-Dépendances :
-```
-streamlit>=1.35
-pandas
-openpyxl>=3.1
-```
+* Exclusion automatique des joueurs **R1**.
+* Toutes les fonctionnalités de la v3.4.
 """
 from __future__ import annotations
 
@@ -51,11 +29,16 @@ WEEKS_AHEAD = 52
 # ---------------------------------------------------------------------------
 
 def _data_editor(df: pd.DataFrame, **kw):
-    return st.data_editor(df, **kw) if hasattr(st, "data_editor") else st.experimental_data_editor(df, **kw)  # type: ignore[attr-defined]
+    if hasattr(st, "data_editor"):
+        return st.data_editor(df, **kw)
+    return st.experimental_data_editor(df, **kw)  # type: ignore[attr-defined]
 
 
 def _rerun():
-    return st.rerun() if hasattr(st, "rerun") else st.experimental_rerun()  # type: ignore[attr-defined]
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
 # DATE HELPERS
@@ -95,7 +78,7 @@ def _players_df() -> pd.DataFrame:
     required = {"Pseudo", "Motif sortie", "Date du train", "Rang"}
     missing = required - set(df.columns)
     if missing:
-        st.error("Colonnes manquantes dans la feuille Membres : " + ", ".join(missing))
+        st.error("Colonnes manquantes : " + ", ".join(missing))
         st.stop()
     return df
 
@@ -146,20 +129,19 @@ def _strip_week(base: str | None, week_dates: set[dt.date]) -> str | None:
     return ", ".join(kept) if kept else None
 
 # ---------------------------------------------------------------------------
-# TIRAGE ENGINE
+# ENGINE
 # ---------------------------------------------------------------------------
 
 def _eligible(df: pd.DataFrame) -> pd.DataFrame:
-    """Joueurs éligibles = pas de motif + Rang différent de R1."""
     no_motif = df["Motif sortie"].fillna("").str.strip() == ""
-    not_r1   = df["Rang"].fillna("").astype(str).str.upper() != "R1"
+    not_r1 = df["Rang"].fillna("").astype(str).str.upper() != "R1"
     return df[no_motif & not_r1]
 
 
 def _draw_week(df: pd.DataFrame, monday: dt.date) -> Dict[dt.date, Tuple[str, str]]:
     dates = [monday + dt.timedelta(days=i) for i in range(7)]
     pool = df["Pseudo"].tolist(); random.shuffle(pool)
-    it = iter(pool); used=set(); sched={}
+    used=set(); it=iter(pool); sched={}
     for d in dates:
         tit = next(p for p in it if p not in used); used.add(tit)
         sup = next(p for p in it if p != tit)
@@ -170,26 +152,24 @@ def _draw_week(df: pd.DataFrame, monday: dt.date) -> Dict[dt.date, Tuple[str, st
 # UPDATE DATES
 # ---------------------------------------------------------------------------
 
-def _update_dates(players: pd.DataFrame, date_map: Dict[str, List[str]]):
-    players["Date du train"] = players.apply(
-        lambda r: _concat(r["Date du train"], date_map.get(r["Pseudo"], [])), axis=1
-    )
+def _update_dates(players: pd.DataFrame, dm: Dict[str, List[str]]):
+    players["Date du train"] = players.apply(lambda r: _concat(r["Date du train"], dm.get(r["Pseudo"], [])), axis=1)
     _write_df(players, MEMBRES_SHEET)
 
 # ---------------------------------------------------------------------------
 # RESET
 # ---------------------------------------------------------------------------
 
-def _reset_all(wb: openpyxl.Workbook, players_df: pd.DataFrame):
+def _reset_all():
+    wb = _open_wb(); pdf = _players_df()
     if TIRAGES_SHEET in wb.sheetnames:
         ws = wb[TIRAGES_SHEET]
         if ws.max_row > 1:
             ws.delete_rows(2, ws.max_row)
     else:
         ws = wb.create_sheet(TIRAGES_SHEET); ws.append(["Semaine", "Date", "Titulaire", "Suppléant"])
-    players_df["Date du train"] = pd.NA
-    _write_df(players_df, MEMBRES_SHEET)
-    wb.save(DATA_FILE)
+    pdf["Date du train"] = pd.NA
+    _write_df(pdf, MEMBRES_SHEET); wb.save(DATA_FILE)
 
 # ---------------------------------------------------------------------------
 # APP
@@ -201,11 +181,39 @@ st.title("🎲 Tirage au sort – Liste Train")
 
 players = _players_df()
 
-# ---- Génération -----------------------------------------------------------
+# --- Génération ------------------------------------------------------------
 
 st.sidebar.header("Générer une semaine")
-exist_ids=set(_tirages_df()["Semaine"].astype(str).str.strip())
-week_opts=[m for m in _next_mondays() if _week_id(m) not in exist_ids]
+exist_ids = set(_tirages_df()["Semaine"].astype(str).str.strip())
+week_opts = [m for m in _next_mondays() if _week_id(m) not in exist_ids]
 
 if week_opts:
-    monday_sel=st.sidebar.selectbox("Semaine", week_opts, format
+    monday_sel = st.sidebar.selectbox(
+        "Semaine", week_opts,
+        format_func=lambda d: f"{_week_id(d)} – {d.strftime('%d/%m/%Y')}"
+    )
+    if st.sidebar.button("🎲 Générer"):
+        if _week_id(monday_sel) in exist_ids:
+            st.sidebar.warning("Cette semaine existe déjà.")
+        else:
+            elig = _eligible(players)
+            if len(elig) < 14:
+                st.sidebar.error("Pas assez de joueurs éligibles (≥14)")
+            else:
+                sched = _draw_week(elig, monday_sel)
+                rows = [(_week_id(monday_sel), d.isoformat(), tit, sup) for d, (tit, sup) in sched.items()]
+                _save_tirages(rows)
+                dm: Dict[str, List[str]] = {}
+                for d, (tit, _) in sched.items():
+                    dm.setdefault(tit, []).append(d.isoformat())
+                _update_dates(players, dm)
+                st.sidebar.success("Semaine enregistrée ✅"); _rerun()
+else:
+    st.sidebar.info("Toutes les semaines futures sont déjà tirées.")
+
+# --- Reset -----------------------------------------------------------------
+
+st.sidebar.header("Réinitialiser")
+with st.sidebar.form("reset_form"):
+    conf = st.text_input("Tape CONFIRMER pour tout effacer")
+    submit
