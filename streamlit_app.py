@@ -103,7 +103,23 @@ def _concat(existing: str | float | None, new_dates: List[str]) -> str | None:
             base.append(d)
     return ", ".join(base) if base else None
 
-# ---------------------------------------------------------------------------
+
+def _strip_week(existing: str | None, week_dates: set[dt.date]) -> str | None:
+    """Retire du champ `existing` toutes les dates présentes dans `week_dates`."""
+    if pd.isna(existing) or existing is None or not str(existing).strip():
+        return existing
+    kept = []
+    for part in str(existing).split(","):
+        p = part.strip()
+        try:
+            d = dt.date.fromisoformat(p)
+            if d in week_dates:
+                continue
+            kept.append(p)
+        except ValueError:
+            kept.append(p)
+    return ", ".join(kept) if kept else None
+
 # TIRAGE LOGIC
 # ---------------------------------------------------------------------------
 
@@ -157,13 +173,13 @@ if week_opts:
             sched = _draw_week(elig, monday_sel)
             rows = [(_week_id(monday_sel), d.isoformat(), tit, sup) for d, (tit, sup) in sched.items()]
             _save_tirages(rows)
-            # Build date_map for tit + sup
+                        # Build date_map uniquement pour les **titulaires**
             date_map: Dict[str, List[str]] = {}
-            for d, (tit, sup) in sched.items():
+            for d, (tit, _) in sched.items():
                 iso = d.isoformat()
-                for p in (tit, sup):
-                    date_map.setdefault(p, []).append(iso)
+                date_map.setdefault(tit, []).append(iso)
             _update_date_column(players, date_map)
+            st.sidebar.success("Semaine enregistrée ✅"); _rerun()(players, date_map)
             st.sidebar.success("Semaine enregistrée ✅"); _rerun()
 else:
     st.sidebar.info("Toutes les semaines futures sont déjà tirées.")
@@ -175,28 +191,28 @@ all_tir = _tirages_df()
 if all_tir.empty:
     st.info("Aucune semaine enregistrée.")
 else:
-    for wid in sorted(all_tir["Semaine"].unique()):
+    for i, wid in enumerate(sorted(all_tir["Semaine"].unique())):
         wk = all_tir[all_tir["Semaine"] == wid][["Date", "Titulaire", "Suppléant"]].copy()
         wk["Date"] = pd.to_datetime(wk["Date"]).dt.strftime("%A %d/%m/%Y"); wk.set_index("Date", inplace=True)
         with st.expander(f"Semaine {wid}"):
-            edited = _data_editor(wk, key=f"ed_{wid}")
-            if st.button("💾 Enregistrer", key=f"save_{wid}"):
+            editor_key = f"ed_{i}_{wid}"
+            save_key   = f"save_{i}_{wid}"
+            edited = _data_editor(wk, key=editor_key)
+            if st.button("💾 Enregistrer", key=save_key):
                 wb = _open_wb(); ws = wb[TIRAGES_SHEET]
                 # delete old
-                rows_del=[i for i,row in enumerate(ws.iter_rows(values_only=True),start=1) if i>1 and row[0]==wid]
+                rows_del=[idx for idx,row in enumerate(ws.iter_rows(values_only=True),start=1) if idx>1 and row[0]==wid]
                 for idx in reversed(rows_del):
                     ws.delete_rows(idx)
-                # build date_map titulaires only & append rows
-                date_map: Dict[str, List[str]] = {}
+                date_map: Dict[str,List[str]] = {}
                 for date_str, row in edited.iterrows():
                     iso = dt.datetime.strptime(date_str, "%A %d/%m/%Y").date().isoformat()
                     ws.append([wid, iso, row["Titulaire"], row["Suppléant"]])
                     date_map.setdefault(row["Titulaire"], []).append(iso)
                 wb.save(DATA_FILE)
-                # strip old week dates then add new titular dates
-                mon = dt.datetime.strptime(wid+"-1", "%Y-W%W-%w").date(); week_dates={mon+dt.timedelta(i) for i in range(7)}
-                players["Date du train"] = players["Date du train"].apply(lambda x: _strip_week(str(x), week_dates))
-                _update_date_column(players, date_map)
+                mon=dt.datetime.strptime(wid+"-1", "%Y-W%W-%w").date(); week_dates={mon+dt.timedelta(i) for i in range(7)}
+                players["Date du train"] = players["Date du train"].apply(lambda x:_strip_week(str(x),week_dates))
+                _update_date_column(players,date_map)
                 st.success("Modifications sauvegardées ✔️"); _rerun()
 
 # Fin de l'app("Historique")
