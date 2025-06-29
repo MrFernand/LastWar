@@ -225,6 +225,38 @@ with st.sidebar.form("reset_form"):
         else:
             st.sidebar.warning("Confirmation incorrecte – reset annulé.")
 
+# ---- Affichage historique --------------------------------------------------
+
+st.subheader("Historique des semaines tirées")
+all_tir = _tirages_df()
+if all_tir.empty:
+    st.info("Aucun tirage enregistré pour l'instant.")
+else:
+    seen = set(); uniq_weeks = []
+    for w in all_tir["Semaine"].astype(str).str.strip():
+        if w not in seen:
+            seen.add(w); uniq_weeks.append(w)
+    for idx, wid in enumerate(sorted(uniq_weeks)):
+        wk = all_tir[all_tir["Semaine"].astype(str).str.strip() == wid][["Date","Titulaire","Suppléant"]].copy()
+        wk["Date"] = pd.to_datetime(wk["Date"]).dt.strftime("%A %d/%m/%Y"); wk.set_index("Date", inplace=True)
+        with st.expander(f"Semaine {wid}"):
+            edited = _data_editor(wk, key=f"ed_{idx}_{wid}")
+            if st.button("💾 Enregistrer", key=f"save_{idx}_{wid}"):
+                wb = _open_wb(); ws = wb[TIRAGES_SHEET]
+                rows_del=[i for i,row in enumerate(ws.iter_rows(values_only=True),start=1) if i>1 and str(row[0]).strip()==wid]
+                for i in reversed(rows_del):
+                    ws.delete_rows(i)
+                date_map: Dict[str,List[str]]={}
+                for date_str,row in edited.iterrows():
+                    iso=dt.datetime.strptime(date_str,"%A %d/%m/%Y").date().isoformat()
+                    ws.append([wid,iso,row["Titulaire"],row["Suppléant"]])
+                    date_map.setdefault(row["Titulaire"], []).append(iso)
+                wb.save(DATA_FILE)
+                mon=dt.datetime.strptime(wid+"-1","%Y-W%W-%w").date(); week_dates={mon+dt.timedelta(i) for i in range(7)}
+                players["Date du train"] = players["Date du train"].apply(lambda x:_strip_week(str(x),week_dates))
+                _update_dates(players,date_map)
+                st.success("Modifications sauvegardées ✔️"); _rerun()
+
 # ---- Téléchargement -------------------------------------------------------
 
 with open(DATA_FILE, "rb") as f:
@@ -234,3 +266,5 @@ with open(DATA_FILE, "rb") as f:
         file_name=DATA_FILE.name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+# Fin de l'app
