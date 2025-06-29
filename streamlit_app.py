@@ -266,3 +266,11 @@ else:
             if st.button("💾 Enregistrer", key=f"save_{wid}"):
                 _apply_edits(edited, wid, wb, players)
                 st.success("Modifications sauvegardées ✔️"); _rerun()
+# --- Téléchargement du classeur -------------------------------------------
+with open(DATA_FILE, "rb") as f:
+    st.download_button(
+        label="📥 Télécharger le fichier Excel mis à jour",
+        data=f.read(),
+        file_name=DATA_FILE.name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
