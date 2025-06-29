@@ -222,6 +222,26 @@ else:
 
 # --- RESET SECTION ---------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# RESET UTIL ------------------------------------------------------------
+
+def _reset_all(wb: openpyxl.Workbook, players_df: pd.DataFrame):
+    """Efface la feuille Tirages (en gardant l'en-tête) et vide Date du train."""
+    # Vider / recréer feuille Tirages
+    if TIRAGES_SHEET in wb.sheetnames:
+        ws = wb[TIRAGES_SHEET]
+        if ws.max_row > 1:
+            ws.delete_rows(2, ws.max_row)
+    else:
+        ws = wb.create_sheet(TIRAGES_SHEET)
+        ws.append(["Semaine", "Date", "Titulaire", "Suppléant"])
+    # Nettoyer colonne Date du train
+    players_df["Date du train"] = pd.NA
+    _write_df(players_df, MEMBRES_SHEET)
+    wb.save(DATA_FILE)
+
+# ---------------------------------------------------------------------------
+
 st.sidebar.header("Réinitialiser")
 with st.sidebar.form("reset_form"):
     confirm = st.text_input("Tape CONFIRMER pour tout effacer")
