@@ -1,24 +1,47 @@
 
-"""streamlit_app.py (v2.1.1 – hot-fix)
-Streamlit app – weekly random draws of titular / substitute guild players.
+"""streamlit_app.py (v3.0 – refonte complète)
+================================================
+Application Streamlit pour gérer les tirages au sort hebdomadaires à partir
+du fichier **Liste_membres_Train.xlsx**.
 
-Hot-fix v2.1.1
---------------
-* **Fix AttributeError** on some Streamlit versions where
-  `st.experimental_rerun()` is no longer present (it was renamed to
-  `st.rerun()` in 2024).  We now call a small helper `safe_rerun()` that uses
-  `st.rerun()` when available and falls back to `st.experimental_rerun()`.
-* No other behaviour changes: the UI still blocks past / existing weeks and
-  shows the full history.
+Fonctionnalités clés
+--------------------
+1. **Source unique** : le classeur Excel contient la feuille « Membres » (données
+   d’origine) *et* la feuille « Tirages » (historique). Le code lit / écrit dans
+   ce même fichier → persistance garantie.
+2. **Exclusions automatiques** : si la colonne **Motif sortie** d’un joueur est
+   renseignée, il est ignoré du tirage.
+3. **Date du train** : lorsqu’un joueur est désigné *Titulaire*, la date
+   correspondante est ajoutée/complétée dans sa colonne **Date du train** (une
+   liste de dates séparées par virgule si plusieurs tirages).
+4. **Tirage hebdomadaire libre** : choisis une semaine future (lundi…) qui n’a
+   pas encore été tirée. Titulaires + Suppléants sont générés ➜ enregistrés dans
+   la feuille « Tirages » + colonne Date du train.
+5. **Modification manuelle** : ouvre un planning dans un formulaire, change un
+   Titulaire (ou Suppléant) puis *Enregistrer* → met à jour historique + Excel.
+6. **Historique complet** : toutes les semaines déjà tirées sont listées avec
+   leurs tableaux.
+7. **Reset sécurisé** : bouton « Réinitialiser tirages » dans la barre latérale
+   ➜ demande de taper « CONFIRMER » avant d’effacer la feuille « Tirages » et
+   de vider toutes les dates du train.
+
+Dépendances (requirements.txt)
+------------------------------
+```
+streamlit>=1.35
+pandas
+openpyxl
+```
 """
 from __future__ import annotations
 
 import datetime as dt
 import random
-import sqlite3
+import sqlite3  # used only for in-memory manipulation; no persistent DB now
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import openpyxl
 import pandas as pd
 import streamlit as st
 
@@ -26,82 +49,67 @@ import streamlit as st
 # Configuration
 # ---------------------------------------------------------------------------
 
-DATA_FILE = Path("guild_players_complete.xlsx")
-DB_FILE = Path("draws.db")
-WEEKS_AHEAD_SHOWN = 52  # how many future weeks to show in the selector
+DATA_FILE = Path("Liste_membres_Train.xlsx")
+MEMBRES_SHEET = "Membres"
+TIRAGES_SHEET = "Tirages"
+WEEKS_AHEAD_SHOWN = 52  # nombre de semaines futures affichées dans la liste
 
 # ---------------------------------------------------------------------------
-# Helper to trigger an app rerun safely across Streamlit versions
+# Excel helpers
 # ---------------------------------------------------------------------------
 
-def safe_rerun() -> None:
-    """Reload the Streamlit script, using the API available in the runtime."""
-    if hasattr(st, "rerun"):
-        st.rerun()
-    else:
-        # Old versions (<1.25) keep the function in the experimental namespace
-        st.experimental_rerun()  # type: ignore[attr-defined]
-
-# ---------------------------------------------------------------------------
-# Database helpers
-# ---------------------------------------------------------------------------
-
-def get_conn() -> sqlite3.Connection:
-    return sqlite3.connect(DB_FILE, check_same_thread=False)
-
-
-def init_db() -> None:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS players(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pseudo TEXT UNIQUE,
-            rank  TEXT
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS draws(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            draw_date TEXT UNIQUE,
-            titular_id INTEGER,
-            substitute_id INTEGER,
-            week_id TEXT,
-            FOREIGN KEY(titular_id) REFERENCES players(id),
-            FOREIGN KEY(substitute_id) REFERENCES players(id)
-        )
-        """
-    )
-    conn.commit()
-
-# ---------------------------------------------------------------------------
-# Player loading (deduplicate & upsert)
-# ---------------------------------------------------------------------------
-
-def load_players() -> None:
+def load_workbook() -> openpyxl.Workbook:
     if not DATA_FILE.exists():
-        st.error(f"Fichier introuvable : {DATA_FILE}")
+        st.error(f"Fichier {DATA_FILE} introuvable. Téléverse-le puis relance l'app.")
         st.stop()
+    return openpyxl.load_workbook(DATA_FILE)
 
-    df = (
-        pd.read_excel(DATA_FILE)
-        .loc[lambda d: d["Rang"] != "R1", ["Pseudo", "Rang"]]
-        .rename(columns={"Pseudo": "pseudo", "Rang": "rank"})
-        .drop_duplicates(subset="pseudo")
-    )
 
-    conn = get_conn()
-    conn.executemany(
-        "INSERT OR IGNORE INTO players(pseudo, rank) VALUES (?, ?)",
-        df.itertuples(index=False, name=None),
-    )
-    conn.commit()
+def load_players_df(wb: openpyxl.Workbook) -> pd.DataFrame:
+    if MEMBRES_SHEET not in wb.sheetnames:
+        st.error(f"La feuille '{MEMBRES_SHEET}' est manquante dans {DATA_FILE}.")
+        st.stop()
+    df = pd.read_excel(DATA_FILE, sheet_name=MEMBRES_SHEET, engine="openpyxl")
+    # Nettoyage des colonnes attendues
+    expected_cols = {"Pseudo", "Motif sortie", "Date du train"}
+    if not expected_cols.issubset(df.columns):
+        st.error("Le fichier doit contenir les colonnes : " + ", ".join(expected_cols))
+        st.stop()
+    return df
+
+
+def save_players_df(df: pd.DataFrame, wb: openpyxl.Workbook) -> None:
+    with pd.ExcelWriter(DATA_FILE, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+        df.to_excel(writer, index=False, sheet_name=MEMBRES_SHEET)
+
+
+def append_tirages_rows(rows: List[Tuple[str, str, str]], wb: openpyxl.Workbook) -> None:
+    """Append rows to sheet (create if absent).
+    rows = [(week_id, date_iso, titulaire_pseudo, suppleant_pseudo)]
+    """
+    if TIRAGES_SHEET not in wb.sheetnames:
+        ws = wb.create_sheet(TIRAGES_SHEET)
+        ws.append(["Semaine", "Date", "Titulaire", "Suppléant"])
+    else:
+        ws = wb[TIRAGES_SHEET]
+    for r in rows:
+        ws.append(list(r))
+    wb.save(DATA_FILE)
+
+
+def clear_tirages_sheet_and_dates(wb: openpyxl.Workbook) -> None:
+    # Delete Tirages sheet if exists
+    if TIRAGES_SHEET in wb.sheetnames:
+        wb.remove(wb[TIRAGES_SHEET])
+    # Clear Date du train column
+    df = load_players_df(wb)
+    if "Date du train" in df.columns:
+        df["Date du train"] = pd.NA
+    save_players_df(df, wb)
+    wb.save(DATA_FILE)
 
 # ---------------------------------------------------------------------------
-# Utility functions (weeks etc.)
+# Utility helpers for weeks & ids
 # ---------------------------------------------------------------------------
 
 def week_id_for_date(d: dt.date) -> str:
@@ -112,134 +120,183 @@ def week_id_for_date(d: dt.date) -> str:
 def monday_of_week(d: dt.date) -> dt.date:
     return d - dt.timedelta(days=d.weekday())
 
-# ---------------------------------------------------------------------------
-# Week lists and history helpers
-# ---------------------------------------------------------------------------
 
-def existing_week_ids() -> List[str]:
-    conn = get_conn()
-    rows = conn.execute("SELECT DISTINCT week_id FROM draws ORDER BY week_id").fetchall()
-    return [r[0] for r in rows]
-
-
-def upcoming_week_mondays(n_weeks: int = WEEKS_AHEAD_SHOWN) -> List[dt.date]:
+def upcoming_week_mondays(n: int = WEEKS_AHEAD_SHOWN) -> List[dt.date]:
     today = dt.date.today()
     next_monday = monday_of_week(today + dt.timedelta(days=7))
-    return [next_monday + dt.timedelta(days=7 * i) for i in range(n_weeks)]
+    return [next_monday + dt.timedelta(days=7 * i) for i in range(n)]
 
 # ---------------------------------------------------------------------------
-# Draw engine
+# Tirage engine (in-memory only, persistence via Excel sheet)
 # ---------------------------------------------------------------------------
 
-def get_player_pool_ids() -> List[int]:
-    conn = get_conn()
-    return [row[0] for row in conn.execute("SELECT id FROM players ORDER BY RANDOM()")]
+def eligible_players(df: pd.DataFrame) -> pd.DataFrame:
+    return df[df["Motif sortie"].fillna("").str.strip() == ""]
 
 
-def generate_week_dates(week_monday: dt.date) -> List[dt.date]:
-    return [week_monday + dt.timedelta(i) for i in range(7)]
-
-
-def draw_players(dates: List[dt.date]) -> Dict[dt.date, Tuple[int, int]]:
-    pool = get_player_pool_ids()
-    random.shuffle(pool)
-    used_titulars: set[int] = set()
-    schedule: Dict[dt.date, Tuple[int, int]] = {}
-    pool_iter = iter(pool)
-
-    for day in dates:
-        # Titular
-        tid = next(pid for pid in pool_iter if pid not in used_titulars)
-        used_titulars.add(tid)
-        # Substitute
-        sid = next(pid for pid in pool_iter if pid != tid)
-        schedule[day] = (tid, sid)
+def draw_week(df_players: pd.DataFrame, week_monday: dt.date) -> Dict[dt.date, Tuple[str, str]]:
+    dates = [week_monday + dt.timedelta(i) for i in range(7)]
+    pseudos = df_players["Pseudo"].tolist()
+    random.shuffle(pseudos)
+    schedule: Dict[dt.date, Tuple[str, str]] = {}
+    used_titulars: set[str] = set()
+    pseudo_iter = iter(pseudos)
+    for d in dates:
+        tit = next(p for p in pseudo_iter if p not in used_titulars)
+        used_titulars.add(tit)
+        sup = next(p for p in pseudo_iter if p != tit)
+        schedule[d] = (tit, sup)
     return schedule
 
+# ---------------------------------------------------------------------------
+# Data access for Tirages sheet
+# ---------------------------------------------------------------------------
 
-def save_draw(schedule: Dict[dt.date, Tuple[int, int]]) -> None:
-    conn = get_conn()
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO draws(draw_date, titular_id, substitute_id, week_id)
-        VALUES (?, ?, ?, ?)
-        """,
-        [
-            (day.isoformat(), tid, sid, week_id_for_date(day))
-            for day, (tid, sid) in schedule.items()
-        ],
-    )
-    conn.commit()
+def tirages_df(wb: openpyxl.Workbook) -> pd.DataFrame:
+    if TIRAGES_SHEET not in wb.sheetnames:
+        return pd.DataFrame(columns=["Semaine", "Date", "Titulaire", "Suppléant"])
+    return pd.read_excel(DATA_FILE, sheet_name=TIRAGES_SHEET, engine="openpyxl")
 
 
-def fetch_schedule(week_id: str) -> pd.DataFrame:
-    conn = get_conn()
-    df = pd.read_sql_query(
-        """
-        SELECT draw_date, p1.pseudo AS Titulaire, p2.pseudo AS Suppléant
-        FROM draws d
-        JOIN players p1 ON p1.id = d.titular_id
-        JOIN players p2 ON p2.id = d.substitute_id
-        WHERE d.week_id = ?
-        ORDER BY draw_date
-        """,
-        conn,
-        params=(week_id,),
-    )
-    if not df.empty:
-        df["draw_date"] = pd.to_datetime(df["draw_date"]).dt.strftime("%A %d/%m/%Y")
-        df = df.set_index("draw_date")
-    return df
+def week_exists(wb: openpyxl.Workbook, week_id: str) -> bool:
+    df = tirages_df(wb)
+    return week_id in df["Semaine"].unique()
 
 # ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
 
-st.set_page_config(page_title="Tirage au sort guild", page_icon="🎲", layout="centered")
+st.set_page_config(page_title="Tirage au sort train", page_icon="🎲", layout="centered")
 
-st.title("🎲 Tirage au sort des joueurs")
+st.title("🎲 Tirages au sort – Liste Train")
 
-init_db()
-load_players()
+wb = load_workbook()
+players_df = load_players_df(wb)
 
-# ---- Sidebar: new week generation ----------------------------------------
+# ---- Sidebar : Générer une nouvelle semaine ---------------------------------------------------
 
-st.sidebar.header("Créer une nouvelle semaine")
+st.sidebar.header("Générer une nouvelle semaine")
 
-existing_ids = set(existing_week_ids())
-week_options = [m for m in upcoming_week_mondays() if week_id_for_date(m) not in existing_ids]
+existing_week_ids = set(tirages_df(wb)["Semaine"].unique())
+week_options = [m for m in upcoming_week_mondays() if week_id_for_date(m) not in existing_week_ids]
 
-if not week_options:
-    st.sidebar.success("Toutes les semaines des 12 prochains mois ont déjà été tirées.")
-else:
-    monday_selected = st.sidebar.selectbox(
-        "Choisis la semaine (lundi) :",
+if week_options:
+    monday_sel = st.sidebar.selectbox(
+        "Choisis la semaine (lundi)",
         week_options,
         format_func=lambda d: f"Semaine {week_id_for_date(d)} (débute le {d.strftime('%d/%m/%Y')})",
     )
+    if st.sidebar.button("🎲 Générer cette semaine"):
+        elig_df = eligible_players(players_df)
+        if len(elig_df) < 14:  # 7 jours × 2 joueurs minimum
+            st.sidebar.error("Pas assez de joueurs éligibles pour générer une semaine complète !")
+        else:
+            schedule = draw_week(elig_df, monday_sel)
 
-    if st.sidebar.button("Générer cette semaine"):
-        dates = generate_week_dates(monday_selected)
-        schedule = draw_players(dates)
-        save_draw(schedule)
-        st.sidebar.success(f"✅ Semaine {week_id_for_date(monday_selected)} créée !")
-        safe_rerun()  # refresh selector & history
+            # 1. Historique (feuille Tirages)
+            rows = [
+                (week_id_for_date(monday_sel), d.isoformat(), tit, sup)
+                for d, (tit, sup) in schedule.items()
+            ]
+            append_tirages_rows(rows, wb)
 
-# ---- Main page: overview --------------------------------------------------
+            # 2. Date du train (ajout / concat)
+            date_map = {tit: d.isoformat() for d, (tit, _) in schedule.items()}
+            players_df["Date du train"] = players_df.apply(
+                lambda r: _concat_date(r["Date du train"], date_map.get(r["Pseudo"])) if r["Pseudo"] in date_map else r["Date du train"],
+                axis=1,
+            )
+            save_players_df(players_df, wb)
 
-current_week_id = week_id_for_date(dt.date.today())
-st.subheader(f"Planning semaine courante ({current_week_id})")
-cur_df = fetch_schedule(current_week_id)
-if cur_df.empty:
-    st.info("Aucun tirage pour cette semaine.")
+            st.sidebar.success("✅ Semaine générée et enregistrée !")
+            st.experimental_rerun()
 else:
-    st.table(cur_df)
+    st.sidebar.info("Toutes les semaines futures déjà générées (jusqu'à 1 an).")
 
-# Historique complet
-st.subheader("Historique des tirages")
-if not existing_ids:
+# ---- Sidebar : Réinitialisation ---------------------------------------------------------------
+
+st.sidebar.header("Réinitialiser les tirages")
+if st.sidebar.button("🗑️ Réinitialiser (tests)"):
+    confirm = st.sidebar.text_input("Écris CONFIRMER pour valider")
+    if confirm == "CONFIRMER":
+        clear_tirages_sheet_and_dates(wb)
+        st.sidebar.success("Tous les tirages ont été réinitialisés !")
+        st.experimental_rerun()
+    else:
+        st.sidebar.warning("Action annulée – saisie incorrecte.")
+
+# ---- Fonction pour concaténer dates dans la colonne Date du train -----------------------------
+
+def _concat_date(existing: str | float | None, new_date: str | None) -> str | None:
+    if new_date is None:
+        return existing
+    if pd.isna(existing) or existing is None:
+        return new_date
+    existing_str = str(existing).strip()
+    if new_date in existing_str.split(","):
+        return existing_str  # déjà présent
+    return existing_str + ", " + new_date
+
+# ---- Affichage de l'historique ---------------------------------------------------------------
+
+st.subheader("Historique des semaines tirées")
+
+tir_df = tirages_df(wb)
+if tir_df.empty:
     st.info("Aucun tirage enregistré pour l'instant.")
 else:
-    for wid in sorted(existing_ids):
+    for wid in sorted(tir_df["Semaine"].unique()):
         with st.expander(f"Semaine {wid}"):
-            st.table(fetch_schedule(wid))
+            week_df = tir_df[tir_df["Semaine"] == wid][["Date", "Titulaire", "Suppléant"]].copy()
+            week_df["Date"] = pd.to_datetime(week_df["Date"]).dt.strftime("%A %d/%m/%Y")
+            week_df.set_index("Date", inplace=True)
+
+            # Editable Titulaire / Suppléant
+            edited = st.experimental_data_editor(week_df, key=f"edit_{wid}")
+            if st.button("💾 Enregistrer les modifications", key=f"save_{wid}"):
+                _apply_edits_and_save(edited, wid, wb, players_df)
+                st.success("Modifications enregistrées !")
+                st.experimental_rerun()
+
+# ---------------------------------------------------------------------------
+# Helper to apply manual edits
+# ---------------------------------------------------------------------------
+
+def _apply_edits_and_save(edited_df: pd.DataFrame, week_id: str, wb: openpyxl.Workbook, players_df: pd.DataFrame) -> None:
+    """Update Tirages sheet + Date du train column according to edited DataFrame."""
+    # 1. Replace rows in Tirages sheet for that week
+    if TIRAGES_SHEET not in wb.sheetnames:
+        st.error("Feuille Tirages manquante – impossible de mettre à jour.")
+        return
+    ws = wb[TIRAGES_SHEET]
+    # Remove existing rows of the week
+    rows_to_delete = [idx for idx, row in enumerate(ws.iter_rows(values_only=True), start=1) if idx > 1 and row[0] == week_id]
+    for excel_idx in reversed(rows_to_delete):
+        ws.delete_rows(excel_idx)
+    # Append new rows
+    for date_str, row in edited_df.iterrows():
+        iso_date = dt.datetime.strptime(date_str, "%A %d/%m/%Y").date().isoformat()
+        ws.append([week_id, iso_date, row["Titulaire"], row["Suppléant"]])
+    wb.save(DATA_FILE)
+
+    # 2. Rebuild Date du train column : clear previous dates of this week then append new ones
+    monday = dt.datetime.strptime(week_id + "-1", "%Y-W%W-%w").date()  # Monday date reconstruction
+    week_dates = {monday + dt.timedelta(i) for i in range(7)}
+    players_df["Date du train"] = players_df["Date du train"].apply(
+        lambda x: _remove_week_dates(str(x), week_dates)
+    )
+    # Add new dates for titulaires only
+    date_map = {row["Titulaire"]: iso for iso, row in zip(edited_df.index, edited_df.itertuples())}
+    players_df["Date du train"] = players_df.apply(
+        lambda r: _concat_date(r["Date du train"], date_map.get(r["Pseudo"])) if r["Pseudo"] in date_map else r["Date du train"],
+        axis=1,
+    )
+    save_players_df(players_df, wb)
+
+
+def _remove_week_dates(existing: str | None, week_dates: set[dt.date]) -> str | None:
+    if pd.isna(existing) or existing is None:
+        return existing
+    dates = [dt.date.fromisoformat(d.strip()) for d in str(existing).split(",")]
+    dates = [d for d in dates if d not in week_dates]
+    return ", ".join(d.isoformat() for d in dates) if dates else None
