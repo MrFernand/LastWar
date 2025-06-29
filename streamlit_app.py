@@ -146,8 +146,8 @@ def _tirages_df(wb: openpyxl.Workbook) -> pd.DataFrame:
 
 
 def _clear_tirages_and_dates(wb: openpyxl.Workbook, players_df: pd.DataFrame) -> None:
-    """Supprime toutes les lignes de la feuille Tirages (en conservant l'en-tête)
-    et remet à blanc la colonne « Date du train ».
+    """Supprime toutes les lignes de la feuille Tirages (en conservant l'en‑tête)
+    et remet à blanc la colonne « Date du train ».
     La feuille est recréée au besoin pour garantir qu’elle existe après reset.
     """
     if TIRAGES_SHEET in wb.sheetnames:
